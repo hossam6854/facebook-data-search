@@ -1,5 +1,5 @@
 // src/pages/SmartLocalSearch.jsx
-import React, { useEffect, useState, useMemo } from "react";
+import React, { useEffect, useState, useMemo, useRef } from "react";
 import * as XLSX from "xlsx";
 
 export default function SmartLocalSearch() {
@@ -16,6 +16,25 @@ export default function SmartLocalSearch() {
 
   // 🔹 حالة جديدة لتحديد إذا كان البحث قد بدأ
   const [searchStarted, setSearchStarted] = useState(false);
+
+  // 🔹 حالات جديدة للتحميل المتقدم
+  const [loadingProgress, setLoadingProgress] = useState(0);
+  const [loadingMessage, setLoadingMessage] = useState("");
+  const [isSearching, setIsSearching] = useState(false);
+  const dataChunksRef = useRef([]);
+  const CHUNK_SIZE = 10000; // تحميل 10,000 سجل في كل دفعة
+
+  // 🔹 حالات جديدة للميزات المتقدمة
+  const [searchHistory, setSearchHistory] = useState([]);
+  const [filters, setFilters] = useState({
+    fileType: "all", // all, text, excel
+    hasPhone: false,
+    hasEmail: false,
+  });
+  const [sortBy, setSortBy] = useState("relevance"); // relevance, name, source
+  const [displayedResults, setDisplayedResults] = useState(50);
+  const searchInputRef = useRef(null);
+  const searchTimeoutRef = useRef(null);
 
   // 🔹 تنظيف النص العربي المتقدم
   const normalizeArabic = (str) => {
@@ -168,7 +187,7 @@ export default function SmartLocalSearch() {
     }
   };
 
-  // 🔹 تحميل وتحليل الملفات (يدعم Excel و TXT)
+  // 🔹 تحميل وتحليل الملفات بطريقة Chunked (على دفعات)
   useEffect(() => {
     const files = [
       "/data/Egypt_1.txt",
@@ -177,18 +196,20 @@ export default function SmartLocalSearch() {
       "/data/Egypt_4.txt",
     ];
 
-    async function loadFiles() {
-      let allData = [];
+    async function loadFilesInChunks() {
+      let totalRecords = 0;
+      let recordsWithData = 0;
+      dataChunksRef.current = [];
 
       try {
         for (let i = 0; i < files.length; i++) {
           const file = files[i];
+          setLoadingMessage(`جاري تحميل ${file}...`);
 
           try {
             const response = await fetch(file);
             if (!response.ok) continue;
 
-            // تحديد نوع الملف
             const isTxtFile = file.toLowerCase().endsWith(".txt");
             const isExcelFile = file.toLowerCase().endsWith(".xlsx");
 
@@ -197,7 +218,6 @@ export default function SmartLocalSearch() {
             let fileData = [];
 
             if (isExcelFile) {
-              // معالجة ملفات Excel
               const buffer = await response.arrayBuffer();
               const workbook = XLSX.read(buffer, { type: "array" });
               const sheetName = workbook.SheetNames[0];
@@ -206,11 +226,9 @@ export default function SmartLocalSearch() {
 
               fileData = json
                 .map((row) => {
-                  // تنظيف الصف - إزالة الحقول الفارغة ومعالجة أرقام الهواتف
                   const cleanedRow = {};
                   Object.keys(row).forEach((key) => {
                     if (row[key] && row[key] !== "" && row[key] !== " ") {
-                      // معالجة أرقام الهواتف
                       if (
                         key.toLowerCase().includes("phone") ||
                         key.toLowerCase().includes("tel")
@@ -226,7 +244,7 @@ export default function SmartLocalSearch() {
                   return {
                     text: cleanedText,
                     source: `Egypt_${i + 1}.xlsx`,
-                    original: cleanedRow, // استخدام الصف المنظف
+                    original: cleanedRow,
                     hasContent: cleanedText.length > 3,
                     id:
                       cleanedRow.id || Math.random().toString(36).substr(2, 9),
@@ -237,7 +255,6 @@ export default function SmartLocalSearch() {
                   (item) => item.text && Object.keys(item.original).length > 0
                 );
             } else if (isTxtFile) {
-              // معالجة ملفات TXT
               const textContent = await response.text();
               const json = parseTxtFile(textContent, `Egypt_${i + 1}`);
 
@@ -247,7 +264,6 @@ export default function SmartLocalSearch() {
                     row.text || row.content || JSON.stringify(row);
                   const cleanedText = normalizeArabic(rawText);
 
-                  // تصفية الحقول الفارغة في الكائن الأصلي
                   const filteredOriginal = {};
                   Object.keys(row).forEach((key) => {
                     const value = row[key];
@@ -267,7 +283,7 @@ export default function SmartLocalSearch() {
                   return {
                     text: cleanedText,
                     source: `Egypt_${i + 1}.txt`,
-                    original: filteredOriginal, // استخدام الكائن المصفى
+                    original: filteredOriginal,
                     hasContent:
                       cleanedText.length > 3 &&
                       Object.keys(filteredOriginal).length > 0,
@@ -283,30 +299,50 @@ export default function SmartLocalSearch() {
                 );
             }
 
+            // 🔹 تقسيم البيانات إلى chunks
+            for (let j = 0; j < fileData.length; j += CHUNK_SIZE) {
+              const chunk = fileData.slice(j, j + CHUNK_SIZE);
+              dataChunksRef.current.push(chunk);
+            }
+
+            totalRecords += fileData.length;
+            recordsWithData += fileData.filter((item) => item.hasContent).length;
+
+            // تحديث التقدم
+            const progress = ((i + 1) / files.length) * 100;
+            setLoadingProgress(progress);
+
             console.log(`📁 تم تحميل ${file}: ${fileData.length} سجل`);
-            allData = [...allData, ...fileData];
           } catch (fileErr) {
             console.error(`خطأ في معالجة ${file}:`, fileErr);
           }
         }
 
-        setData(allData);
-        // 🔹 التغيير: لا نعرض أي نتائج في البداية
+        // حفظ فقط عينة صغيرة للعرض الأولي
+        const sampleData = dataChunksRef.current
+          .slice(0, 5)
+          .flat()
+          .slice(0, 1000);
+        setData(sampleData);
         setResults([]);
         setStats({
-          total: allData.length,
-          withData: allData.filter((item) => item.hasContent).length,
+          total: totalRecords,
+          withData: recordsWithData,
         });
 
-        console.log(`🎉 تم تحميل ${allData.length} سجل من ${files.length} ملف`);
+        setLoadingMessage("✅ اكتمل التحميل!");
+        console.log(
+          `🎉 تم تحميل ${totalRecords} سجل في ${dataChunksRef.current.length} chunk`
+        );
       } catch (err) {
         console.error("خطأ في تحميل الملفات:", err);
+        setLoadingMessage("❌ حدث خطأ في التحميل");
       } finally {
-        setLoading(false);
+        setTimeout(() => setLoading(false), 500);
       }
     }
 
-    loadFiles();
+    loadFilesInChunks();
   }, []);
 
 
@@ -418,35 +454,146 @@ export default function SmartLocalSearch() {
     return Array.from(variations);
   };
 
-  // 🔹 إعداد البحث باستخدام البحث الدقيق بدلاً من Fuse.js
-  const searchEngine = useMemo(() => {
-    if (data.length === 0) return null;
 
-    const dataWithContent = data.filter((item) => item.hasContent);
 
-    return {
-      search: (query) => performExactSearch(query, dataWithContent),
-    };
-  }, [data]);
-
-  // 🔹 البحث التلقائي - التصحيح الرئيسي هنا
+  // 🔹 البحث المحسّن مع Debouncing
   useEffect(() => {
-    if (!searchEngine) return;
-
-    // 🔹 التغيير: لا نعرض أي نتائج في البداية
     if (query.trim() === "") {
       setResults([]);
       setSearchStarted(false);
       setCurrentPage(1);
+      setIsSearching(false);
+      setDisplayedResults(50);
       return;
     }
 
-    // 🔹 التغيير: استخدام البحث الدقيق
     setSearchStarted(true);
-    const res = searchEngine.search(query);
-    setResults(res);
+    setIsSearching(true);
+
+    // Debouncing - الانتظار 300ms قبل البحث
+    if (searchTimeoutRef.current) {
+      clearTimeout(searchTimeoutRef.current);
+    }
+
+    searchTimeoutRef.current = setTimeout(() => {
+      performSearch();
+    }, 300);
+
+    return () => {
+      if (searchTimeoutRef.current) {
+        clearTimeout(searchTimeoutRef.current);
+      }
+    };
+  }, [query]);
+
+  // 🔹 دالة البحث الرئيسية
+  const performSearch = async () => {
+    const allResults = [];
+    const normalizedQuery = normalizeArabic(query).trim();
+    const startTime = performance.now();
+
+    for (let i = 0; i < dataChunksRef.current.length; i++) {
+      const chunk = dataChunksRef.current[i];
+      const chunkResults = performExactSearch(normalizedQuery, chunk);
+      allResults.push(...chunkResults);
+
+      // تحديث النتائج تدريجياً كل 10 chunks
+      if (i % 10 === 0 || i === dataChunksRef.current.length - 1) {
+        setResults([...allResults]);
+      }
+
+      // إعطاء فرصة للواجهة للتحديث
+      if (i % 50 === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+    }
+
+    const endTime = performance.now();
+    const searchTime = ((endTime - startTime) / 1000).toFixed(2);
+
+    // تطبيق الفلاتر
+    let filteredResults = applyFilters(allResults);
+    
+    // تطبيق الترتيب
+    filteredResults = applySorting(filteredResults);
+
+    setResults(filteredResults);
+    setIsSearching(false);
     setCurrentPage(1);
-  }, [query, searchEngine]);
+    setDisplayedResults(50);
+
+    // إضافة للسجل
+    addToSearchHistory(query, filteredResults.length, searchTime);
+
+    console.log(`✅ البحث اكتمل في ${searchTime} ثانية - ${filteredResults.length} نتيجة`);
+  };
+
+  // 🔹 تطبيق الفلاتر
+  const applyFilters = (results) => {
+    let filtered = [...results];
+
+    if (filters.fileType !== "all") {
+      filtered = filtered.filter((item) => item.fileType === filters.fileType);
+    }
+
+    if (filters.hasPhone) {
+      filtered = filtered.filter((item) =>
+        Object.keys(item.original).some(
+          (key) =>
+            key.toLowerCase().includes("phone") ||
+            key.toLowerCase().includes("tel")
+        )
+      );
+    }
+
+    if (filters.hasEmail) {
+      filtered = filtered.filter((item) =>
+        Object.keys(item.original).some((key) =>
+          key.toLowerCase().includes("email")
+        )
+      );
+    }
+
+    return filtered;
+  };
+
+  // 🔹 تطبيق الترتيب
+  const applySorting = (results) => {
+    const sorted = [...results];
+
+    switch (sortBy) {
+      case "name":
+        return sorted.sort((a, b) => {
+          const nameA =
+            a.original.name ||
+            a.original.first_name ||
+            a.original.content ||
+            "";
+          const nameB =
+            b.original.name ||
+            b.original.first_name ||
+            b.original.content ||
+            "";
+          return nameA.localeCompare(nameB, "ar");
+        });
+      case "source":
+        return sorted.sort((a, b) => a.source.localeCompare(b.source));
+      default:
+        return sorted; // relevance - الترتيب الافتراضي
+    }
+  };
+
+  // 🔹 إضافة للسجل
+  const addToSearchHistory = (searchQuery, resultsCount, time) => {
+    const historyItem = {
+      query: searchQuery,
+      count: resultsCount,
+      time: time,
+      timestamp: new Date().toLocaleTimeString("ar-EG"),
+    };
+
+    setSearchHistory((prev) => [historyItem, ...prev.slice(0, 9)]); // آخر 10 عمليات بحث
+  };
 
   // 🔹 تحسين معالجة أرقام الهواتف في تحميل البيانات
   const processPhoneNumber = (phone) => {
@@ -465,14 +612,66 @@ export default function SmartLocalSearch() {
     return phoneStr;
   };
 
-  // 🔹 حساب التصفح
-  const indexOfLastItem = currentPage * itemsPerPage;
-  const indexOfFirstItem = indexOfLastItem - itemsPerPage;
-  const currentItems = results.slice(indexOfFirstItem, indexOfLastItem);
-  const totalPages = Math.ceil(results.length / itemsPerPage);
+  // 🔹 Infinite Scroll - عرض النتائج تدريجياً
+  const currentItems = results.slice(0, displayedResults);
+  const hasMore = displayedResults < results.length;
 
-  // 🔹 تغيير الصفحة
-  const paginate = (pageNumber) => setCurrentPage(pageNumber);
+  // 🔹 تحميل المزيد من النتائج
+  const loadMore = () => {
+    setDisplayedResults((prev) => Math.min(prev + 50, results.length));
+  };
+
+  // 🔹 Keyboard Shortcuts
+  useEffect(() => {
+    const handleKeyPress = (e) => {
+      // Ctrl+K أو Cmd+K للتركيز على البحث
+      if ((e.ctrlKey || e.metaKey) && e.key === "k") {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+      }
+
+      // ESC للخروج من البحث
+      if (e.key === "Escape") {
+        setQuery("");
+        searchInputRef.current?.blur();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyPress);
+    return () => window.removeEventListener("keydown", handleKeyPress);
+  }, []);
+
+  // 🔹 تمييز النص في النتائج
+  const highlightText = (text, highlight) => {
+    if (!highlight.trim() || !text) return text;
+
+    const normalizedHighlight = normalizeArabic(highlight);
+    const normalizedText = normalizeArabic(String(text));
+    const index = normalizedText.toLowerCase().indexOf(normalizedHighlight.toLowerCase());
+
+    if (index === -1) return text;
+
+    const beforeMatch = String(text).substring(0, index);
+    const match = String(text).substring(index, index + normalizedHighlight.length);
+    const afterMatch = String(text).substring(index + normalizedHighlight.length);
+
+    return (
+      <>
+        {beforeMatch}
+        <mark className="bg-yellow-300 px-1 rounded">{match}</mark>
+        {afterMatch}
+      </>
+    );
+  };
+
+  // 🔹 تصدير النتائج
+  const exportResults = () => {
+    const dataToExport = results.map((item) => item.original);
+    const worksheet = XLSX.utils.json_to_sheet(dataToExport);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Results");
+    XLSX.writeFile(workbook, `search_results_${Date.now()}.xlsx`);
+  };
 
   // 🔹 الحصول على الأيقونة المناسبة للحقل
   const getFieldIcon = (key) => {
@@ -631,8 +830,8 @@ export default function SmartLocalSearch() {
                     title={String(value)}
                   >
                     {String(value).length > 15
-                      ? String(value).substring(0, 15) + "..."
-                      : String(value)}
+                      ? highlightText(String(value).substring(0, 15) + "...", query)
+                      : highlightText(String(value), query)}
                   </p>
                 </div>
               </div>
@@ -773,7 +972,7 @@ export default function SmartLocalSearch() {
                           </a>
                         ) : (
                           <p className="text-gray-900 text-sm leading-relaxed break-words">
-                            {String(value)}
+                            {highlightText(String(value), query)}
                           </p>
                         )}
                       </div>
@@ -807,65 +1006,18 @@ export default function SmartLocalSearch() {
     );
   };
 
-  // 🔹 مكون التصفح
-  const renderPagination = () => {
-    if (totalPages <= 1) return null;
-
-    const pageNumbers = [];
-    const maxVisiblePages = 5;
-
-    let startPage = Math.max(1, currentPage - Math.floor(maxVisiblePages / 2));
-    let endPage = Math.min(totalPages, startPage + maxVisiblePages - 1);
-
-    if (endPage - startPage + 1 < maxVisiblePages) {
-      startPage = Math.max(1, endPage - maxVisiblePages + 1);
-    }
-
-    for (let i = startPage; i <= endPage; i++) {
-      pageNumbers.push(i);
-    }
+  // 🔹 مكون Load More (بدلاً من Pagination)
+  const renderLoadMore = () => {
+    if (!hasMore) return null;
 
     return (
-      <div className="flex justify-center items-center mt-8 space-x-2 space-x-reverse">
-        {/* زر الصفحة السابقة */}
+      <div className="flex justify-center items-center mt-8">
         <button
-          onClick={() => paginate(Math.max(1, currentPage - 1))}
-          disabled={currentPage === 1}
-          className={`px-4 py-2 rounded-lg border ${
-            currentPage === 1
-              ? "bg-gray-100 text-gray-400 cursor-not-allowed"
-              : "bg-white text-amber-600 border-amber-300 hover:bg-amber-50"
-          }`}
+          onClick={loadMore}
+          className="px-8 py-4 bg-gradient-to-r from-amber-500 to-orange-500 text-white rounded-2xl hover:from-amber-600 hover:to-orange-600 transition-all shadow-lg font-semibold flex items-center space-x-2 space-x-reverse"
         >
-          السابق
-        </button>
-
-        {/* أرقام الصفحات */}
-        {pageNumbers.map((number) => (
-          <button
-            key={number}
-            onClick={() => paginate(number)}
-            className={`px-4 py-2 rounded-lg border ${
-              currentPage === number
-                ? "bg-amber-500 text-white border-amber-500"
-                : "bg-white text-amber-600 border-amber-300 hover:bg-amber-50"
-            }`}
-          >
-            {number}
-          </button>
-        ))}
-
-        {/* زر الصفحة التالية */}
-        <button
-          onClick={() => paginate(Math.min(totalPages, currentPage + 1))}
-          disabled={currentPage === totalPages}
-          className={`px-4 py-2 rounded-lg border ${
-            currentPage === totalPages
-              ? "bg-gray-100 text-gray-400 cursor-not-allowed"
-              : "bg-white text-amber-600 border-amber-300 hover:bg-amber-50"
-          }`}
-        >
-          التالي
+          <span>تحميل المزيد</span>
+          <span>({results.length - displayedResults} متبقي)</span>
         </button>
       </div>
     );
@@ -878,9 +1030,18 @@ export default function SmartLocalSearch() {
         className="flex items-center justify-center h-screen text-lg font-semibold text-gray-600"
         dir="rtl"
       >
-        <div className="text-center">
+        <div className="text-center max-w-md mx-auto">
           <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-amber-600 mx-auto mb-4"></div>
-          جارِ تحميل البيانات من الملفات...
+          <p className="mb-4">{loadingMessage || "جارِ تحميل البيانات..."}</p>
+          
+          {/* Progress Bar */}
+          <div className="w-full bg-gray-200 rounded-full h-4 mb-2">
+            <div
+              className="bg-gradient-to-r from-amber-500 to-orange-500 h-4 rounded-full transition-all duration-300"
+              style={{ width: `${loadingProgress}%` }}
+            ></div>
+          </div>
+          <p className="text-sm text-gray-500">{Math.round(loadingProgress)}%</p>
         </div>
       </div>
     );
@@ -934,17 +1095,28 @@ export default function SmartLocalSearch() {
           <div className="flex flex-col lg:flex-row gap-4 items-center">
             <div className="flex-1 relative">
               <input
+                ref={searchInputRef}
                 type="text"
-                placeholder="🔍 ابحث في جميع البيانات (بحث دقيق - يدعم أرقام الهواتف، الـ ID، النص)..."
+                placeholder="🔍 ابحث في جميع البيانات... (Ctrl+K للبحث السريع)"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                className="w-full px-6 py-4 border border-amber-300 rounded-2xl shadow-sm focus:ring-2 focus:ring-amber-500 focus:outline-none text-gray-800 text-lg bg-amber-50"
+                className="w-full px-6 py-4 border border-amber-300 rounded-2xl shadow-sm focus:ring-2 focus:ring-amber-500 focus:outline-none text-gray-800 text-lg bg-amber-50 transition-all"
+                disabled={isSearching}
               />
               <div className="absolute left-3 top-1/2 transform -translate-y-1/2 text-xs text-gray-500 bg-amber-100 px-2 py-1 rounded">
-                {results.length > 20000
-                  ? "20,000+"
-                  : results.length.toLocaleString()}{" "}
-                نتيجة
+                {isSearching ? (
+                  <span className="flex items-center">
+                    <span className="animate-spin mr-1">⏳</span>
+                    جاري البحث...
+                  </span>
+                ) : (
+                  <span>
+                    {results.length > 20000
+                      ? "20,000+"
+                      : results.length.toLocaleString()}{" "}
+                    نتيجة
+                  </span>
+                )}
               </div>
             </div>
             <button
@@ -967,21 +1139,82 @@ export default function SmartLocalSearch() {
             </div>
           )}
         </div>
+        {/* الفلاتر والترتيب */}
+        {searchStarted && results.length > 0 && (
+          <div className="bg-white rounded-2xl shadow-lg p-6 mb-8">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              {/* الفلاتر */}
+              <div className="flex items-center space-x-4 space-x-reverse flex-wrap gap-2">
+                <span className="text-sm font-semibold text-gray-700">🎯 فلتر:</span>
+                <select
+                  value={filters.fileType}
+                  onChange={(e) => setFilters({ ...filters, fileType: e.target.value })}
+                  className="px-4 py-2 border border-amber-300 rounded-lg focus:ring-2 focus:ring-amber-500 focus:outline-none text-sm"
+                >
+                  <option value="all">كل الملفات</option>
+                  <option value="text">ملفات نصية فقط</option>
+                  <option value="excel">Excel فقط</option>
+                </select>
+
+                <label className="flex items-center space-x-2 space-x-reverse cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={filters.hasPhone}
+                    onChange={(e) => setFilters({ ...filters, hasPhone: e.target.checked })}
+                    className="w-4 h-4 text-amber-600 rounded focus:ring-amber-500"
+                  />
+                  <span className="text-sm text-gray-700">📱 يحتوي على هاتف</span>
+                </label>
+
+                <label className="flex items-center space-x-2 space-x-reverse cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={filters.hasEmail}
+                    onChange={(e) => setFilters({ ...filters, hasEmail: e.target.checked })}
+                    className="w-4 h-4 text-amber-600 rounded focus:ring-amber-500"
+                  />
+                  <span className="text-sm text-gray-700">📧 يحتوي على بريد</span>
+                </label>
+              </div>
+
+              {/* الترتيب */}
+              <div className="flex items-center space-x-4 space-x-reverse">
+                <span className="text-sm font-semibold text-gray-700">📊 ترتيب:</span>
+                <select
+                  value={sortBy}
+                  onChange={(e) => setSortBy(e.target.value)}
+                  className="px-4 py-2 border border-amber-300 rounded-lg focus:ring-2 focus:ring-amber-500 focus:outline-none text-sm"
+                >
+                  <option value="relevance">الأكثر صلة</option>
+                  <option value="name">حسب الاسم</option>
+                  <option value="source">حسب المصدر</option>
+                </select>
+
+                <button
+                  onClick={exportResults}
+                  className="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-all text-sm font-semibold flex items-center space-x-2 space-x-reverse"
+                >
+                  <span>📥</span>
+                  <span>تصدير</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* النتائج */}
         <div className="mb-8">
           <div className="flex items-center justify-between mb-6">
             <h2 className="text-2xl font-bold text-gray-800">النتائج</h2>
             <div className="flex items-center space-x-4 space-x-reverse">
               {searchStarted && (
-                <span className="bg-amber-100 text-amber-800 px-4 py-2 rounded-full font-semibold">
+                <span className="bg-amber-100 text-amber-800 px-4 py-2 rounded-full font-semibold animate-pulse">
                   {results.length.toLocaleString()} نتيجة
                 </span>
               )}
-              {searchStarted && results.length > itemsPerPage && (
-                <span className="text-gray-600">
-                  الصفحة {currentPage} من {totalPages}({indexOfFirstItem + 1} -{" "}
-                  {Math.min(indexOfLastItem, results.length)} من{" "}
-                  {results.length.toLocaleString()})
+              {searchStarted && results.length > 0 && (
+                <span className="text-gray-600 text-sm">
+                  عرض {Math.min(displayedResults, results.length)} من {results.length.toLocaleString()}
                 </span>
               )}
             </div>
@@ -1019,8 +1252,8 @@ export default function SmartLocalSearch() {
                 ))}
               </div>
 
-              {/* التصفح */}
-              {renderPagination()}
+              {/* Load More */}
+              {renderLoadMore()}
             </>
           )}
         </div>
@@ -1028,6 +1261,36 @@ export default function SmartLocalSearch() {
 
       {/* المودال */}
       {renderDetailModal()}
+
+      {/* سجل البحث */}
+      {searchHistory.length > 0 && (
+        <div className="bg-white rounded-2xl shadow-lg p-6 mb-8">
+          <h3 className="text-xl font-bold text-gray-800 mb-4 flex items-center">
+            <span className="mr-2">🕐</span>
+            سجل البحث الأخير
+          </h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+            {searchHistory.slice(0, 6).map((item, idx) => (
+              <div
+                key={idx}
+                onClick={() => setQuery(item.query)}
+                className="bg-amber-50 rounded-lg p-3 cursor-pointer hover:bg-amber-100 transition-all border border-amber-200"
+              >
+                <div className="flex items-center justify-between mb-1">
+                  <span className="font-semibold text-gray-800 truncate flex-1">
+                    {item.query}
+                  </span>
+                  <span className="text-xs text-gray-500">{item.timestamp}</span>
+                </div>
+                <div className="flex items-center space-x-3 space-x-reverse text-xs text-gray-600">
+                  <span>📊 {item.count} نتيجة</span>
+                  <span>⏱️ {item.time}s</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* الفوتر */}
       <footer className="mt-16 bg-gradient-to-r from-amber-50 to-orange-50 border-t border-amber-100 py-8">
