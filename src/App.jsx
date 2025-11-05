@@ -22,7 +22,8 @@ export default function SmartLocalSearch() {
   const [loadingMessage, setLoadingMessage] = useState("");
   const [isSearching, setIsSearching] = useState(false);
   const dataChunksRef = useRef([]);
-  const CHUNK_SIZE = 10000; // تحميل 10,000 سجل في كل دفعة
+  const CHUNK_SIZE = 5000; // تحميل 5,000 سجل في كل دفعة (تقليل حجم الـ chunk)
+  const MAX_CHUNKS_IN_MEMORY = 50; // الحد الأقصى للـ chunks في الذاكرة
 
   // 🔹 حالات جديدة للميزات المتقدمة
   const [searchHistory, setSearchHistory] = useState([]);
@@ -32,7 +33,7 @@ export default function SmartLocalSearch() {
     hasEmail: false,
   });
   const [sortBy, setSortBy] = useState("relevance"); // relevance, name, source
-  const [displayedResults, setDisplayedResults] = useState(50);
+  const [displayedResults, setDisplayedResults] = useState(30);
   const searchInputRef = useRef(null);
   const searchTimeoutRef = useRef(null);
 
@@ -299,10 +300,16 @@ export default function SmartLocalSearch() {
                 );
             }
 
-            // 🔹 تقسيم البيانات إلى chunks
+            // 🔹 تقسيم البيانات إلى chunks مع تحديد الحد الأقصى
             for (let j = 0; j < fileData.length; j += CHUNK_SIZE) {
               const chunk = fileData.slice(j, j + CHUNK_SIZE);
               dataChunksRef.current.push(chunk);
+              
+              // تحرير الذاكرة إذا تجاوزنا الحد الأقصى
+              if (dataChunksRef.current.length > MAX_CHUNKS_IN_MEMORY) {
+                // نحتفظ فقط بآخر MAX_CHUNKS_IN_MEMORY chunks
+                dataChunksRef.current = dataChunksRef.current.slice(-MAX_CHUNKS_IN_MEMORY);
+              }
             }
 
             totalRecords += fileData.length;
@@ -320,9 +327,9 @@ export default function SmartLocalSearch() {
 
         // حفظ فقط عينة صغيرة للعرض الأولي
         const sampleData = dataChunksRef.current
-          .slice(0, 5)
+          .slice(0, 3)
           .flat()
-          .slice(0, 1000);
+          .slice(0, 500); // تقليل العينة الأولية
         setData(sampleData);
         setResults([]);
         setStats({
@@ -463,7 +470,7 @@ export default function SmartLocalSearch() {
       setSearchStarted(false);
       setCurrentPage(1);
       setIsSearching(false);
-      setDisplayedResults(50);
+      setDisplayedResults(30);
       return;
     }
 
@@ -486,24 +493,31 @@ export default function SmartLocalSearch() {
     };
   }, [query]);
 
-  // 🔹 دالة البحث الرئيسية
+  // 🔹 دالة البحث الرئيسية - محسّنة لتقليل استهلاك الذاكرة
   const performSearch = async () => {
     const allResults = [];
     const normalizedQuery = normalizeArabic(query).trim();
     const startTime = performance.now();
+    const MAX_RESULTS = 10000; // الحد الأقصى للنتائج لتجنب استهلاك الذاكرة
 
     for (let i = 0; i < dataChunksRef.current.length; i++) {
+      // إيقاف البحث إذا وصلنا للحد الأقصى من النتائج
+      if (allResults.length >= MAX_RESULTS) {
+        console.log(`⚠️ تم الوصول للحد الأقصى من النتائج (${MAX_RESULTS})`);
+        break;
+      }
+
       const chunk = dataChunksRef.current[i];
       const chunkResults = performExactSearch(normalizedQuery, chunk);
-      allResults.push(...chunkResults);
+      allResults.push(...chunkResults.slice(0, MAX_RESULTS - allResults.length));
 
-      // تحديث النتائج تدريجياً كل 10 chunks
-      if (i % 10 === 0 || i === dataChunksRef.current.length - 1) {
+      // تحديث النتائج تدريجياً كل 5 chunks
+      if (i % 5 === 0 || i === dataChunksRef.current.length - 1) {
         setResults([...allResults]);
       }
 
-      // إعطاء فرصة للواجهة للتحديث
-      if (i % 50 === 0) {
+      // إعطاء فرصة للواجهة للتحديث وتحرير الذاكرة
+      if (i % 10 === 0) {
         await new Promise((resolve) => setTimeout(resolve, 0));
       }
     }
@@ -618,7 +632,7 @@ export default function SmartLocalSearch() {
 
   // 🔹 تحميل المزيد من النتائج
   const loadMore = () => {
-    setDisplayedResults((prev) => Math.min(prev + 50, results.length));
+    setDisplayedResults((prev) => Math.min(prev + 30, results.length));
   };
 
   // 🔹 Keyboard Shortcuts
